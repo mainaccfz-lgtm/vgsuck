@@ -89,23 +89,18 @@ function sendToRiotGateway(string $payload, string $region, string $action = 'au
     return $response;
 }
 
-// ==================== GATEWAY アクション処理（純粋リレー） ====================
+// ==================== GATEWAY アクション処理 ====================
 function handleGatewayAction(array $input): array {
     debug_log("handleGatewayAction called");
-    
-    // ★★★ デバッグ: 入力全体をログ出力 ★★★
-    debug_log("handleGatewayAction: input keys=" . implode(',', array_keys($input)));
     
     $d = $input['d'] ?? '';
     $puuid = $input['puuid'] ?? '';
     $region = $input['region'] ?? 'ap';
     $action_type = $input['type'] ?? 'auth';
-    $t = $input['t'] ?? '';
     
-    debug_log("handleGatewayAction: region=" . $region . " type=" . $action_type . " t=" . $t . " d_len=" . strlen($d));
+    debug_log("handleGatewayAction: region=" . $region . " type=" . $action_type . " d_len=" . strlen($d));
     
     if (empty($d)) {
-        debug_log("handleGatewayAction: d is empty, checking input");
         return ['success' => false, 'error' => 'missing d field'];
     }
     
@@ -137,8 +132,12 @@ function handleGatewayAction(array $input): array {
         
         debug_log("handleGatewayAction: Riot response len=" . strlen($riotResponse));
         
+        // ★★★ ★★★ Base64エンコード（生データを確実に） ★★★ ★★★
         $result = base64_encode($riotResponse);
         debug_log("handleGatewayAction: encoded result len=" . strlen($result));
+        
+        // ★★★ ★★★ デバッグ: エンコード結果の先頭を表示 ★★★ ★★★
+        debug_log("handleGatewayAction: encoded result preview: " . substr($result, 0, 100) . "...");
         
         return [
             'success' => true,
@@ -154,84 +153,62 @@ function handleGatewayAction(array $input): array {
 // ==================== メインリクエスト処理 ====================
 $raw_input = file_get_contents("php://input");
 debug_log("=== REQUEST START ===");
-
-// ★★★ 生データの先頭をログ出力 ★★★
 debug_log("raw_input (first 500): " . substr($raw_input, 0, 500) . "...");
 
 $input = json_decode($raw_input, true);
 
-// ★★★ ★★★ JSONデコード失敗時のフォールバック ★★★ ★★★
+// JSONデコード失敗時のフォールバック
 if (!is_array($input)) {
-    debug_log("JSON decode failed, trying to extract action manually");
+    debug_log("JSON decode failed, trying to extract manually");
     
-    // 手動で action を抽出
     $action = '';
     if (preg_match('/"action"\s*:\s*"([^"]+)"/', $raw_input, $matches)) {
         $action = $matches[1];
-        debug_log("Manual action extraction: " . $action);
     }
     
-    // 手動で d を抽出
     $d = '';
     if (preg_match('/"d"\s*:\s*"([^"]+)"/', $raw_input, $matches)) {
         $d = $matches[1];
-        debug_log("Manual d extraction: " . substr($d, 0, 100) . "...");
     }
     
-    // 手動で puuid を抽出
     $puuid = '';
     if (preg_match('/"puuid"\s*:\s*"([^"]+)"/', $raw_input, $matches)) {
         $puuid = $matches[1];
-        debug_log("Manual puuid extraction: " . $puuid);
     }
     
-    // 手動で region を抽出
     $region = 'ap';
     if (preg_match('/"region"\s*:\s*"([^"]+)"/', $raw_input, $matches)) {
         $region = $matches[1];
-        debug_log("Manual region extraction: " . $region);
     }
     
-    // 手動で type を抽出
     $type = 'auth';
     if (preg_match('/"type"\s*:\s*"([^"]+)"/', $raw_input, $matches)) {
         $type = $matches[1];
-        debug_log("Manual type extraction: " . $type);
     }
     
     if ($action === 'gateway' && !empty($d)) {
-        debug_log("Manual extraction successful, processing gateway action");
+        debug_log("Manual extraction: processing gateway");
         
         try {
             $decoded = base64_decode($d, true);
             if ($decoded === false || empty($decoded)) {
-                debug_log("Manual: base64 decode failed");
-                http_response_code(400);
-                die(json_encode(["success" => false, "message" => "invalid base64 data"]));
+                throw new RuntimeException("Invalid base64");
             }
             
-            $action_map = [
-                'auth' => '3',
-                'access' => '4',
-                'heartbeat' => '6',
-                'report' => '5'
-            ];
             $riot_action = 'auth';
             if ($type === '4' || $type === 'access') $riot_action = 'access';
             elseif ($type === '6' || $type === 'heartbeat' || $type === '7') $riot_action = 'heartbeat';
             elseif ($type === '5' || $type === 'report') $riot_action = 'report';
             
-            debug_log("Manual: sending to Riot with action=" . $riot_action);
-            
             $riotResponse = sendToRiotGateway($decoded, $region, $riot_action);
             
             if (empty($riotResponse)) {
-                debug_log("Manual: empty Riot response");
-                http_response_code(400);
-                die(json_encode(["success" => false, "message" => "empty response"]));
+                throw new RuntimeException("Empty response");
             }
             
             $result = base64_encode($riotResponse);
+            debug_log("Manual: encoded result len=" . strlen($result));
+            
             die(json_encode(["success" => true, "data" => $result]));
             
         } catch (Exception $e) {
@@ -242,10 +219,9 @@ if (!is_array($input)) {
     }
     
     http_response_code(400);
-    die(json_encode(["success" => false, "message" => "invalid JSON: " . substr($raw_input, 0, 200)]));
+    die(json_encode(["success" => false, "message" => "invalid JSON"]));
 }
 
-// ★★★ 通常の処理 ★★★
 $action = $input["action"] ?? "auth";
 $gameToken = $input["gametoken"] ?? $input["token"] ?? null;
 $sid = $input["sid"] ?? null;
@@ -254,7 +230,7 @@ $region = strtolower(trim($input["region"] ?? 'ap'));
 
 debug_log("action: '" . $action . "'");
 
-// ==================== GATEWAY アクション（純粋リレー） ====================
+// ==================== GATEWAY アクション ====================
 if ($action === "gateway") {
     debug_log("Processing gateway relay action");
     $result = handleGatewayAction($input);
@@ -273,7 +249,7 @@ if ($action === "hb_blob") {
     $auth_data = $input['auth_data'] ?? null;
     $region = $input['region'] ?? 'ap';
     
-    debug_log("HB_BLOB: session_id=" . $session_id . " puuid=" . $puuid);
+    debug_log("HB_BLOB: session_id=" . $session_id . " puuid=" . $puuid . " auth_data_len=" . strlen($auth_data));
     
     if (!$session_id || !$puuid || !$auth_data) {
         debug_log("HB_BLOB: missing required fields");
@@ -285,6 +261,8 @@ if ($action === "hb_blob") {
         debug_log("HB_BLOB: Invalid auth data");
         die(json_encode(["success" => false, "message" => "invalid auth data"]));
     }
+    
+    debug_log("HB_BLOB: auth_decoded len=" . strlen($auth_decoded));
     
     try {
         $sessions = loadSessions();
@@ -300,6 +278,7 @@ if ($action === "hb_blob") {
             saveSessions($sessions);
         }
         
+        // ACCESS
         debug_log("HB_BLOB: Sending ACCESS request...");
         $access_response = sendToRiotGateway($auth_decoded, $region, 'access');
         
@@ -308,6 +287,7 @@ if ($action === "hb_blob") {
         }
         debug_log("HB_BLOB: ACCESS response len=" . strlen($access_response));
         
+        // HEARTBEAT
         debug_log("HB_BLOB: Sending HEARTBEAT request...");
         $heartbeat_response = sendToRiotGateway($access_response, $region, 'heartbeat');
         
@@ -318,6 +298,7 @@ if ($action === "hb_blob") {
         debug_log("HB_BLOB: HEARTBEAT response len=" . strlen($heartbeat_response));
         
         $hb_blob = base64_encode($heartbeat_response);
+        debug_log("HB_BLOB: encoded hb_blob len=" . strlen($hb_blob));
         
         die(json_encode([
             "success" => true,
