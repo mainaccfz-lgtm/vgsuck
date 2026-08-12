@@ -89,7 +89,7 @@ function sendToRiotGateway(string $payload, string $region, string $action = 'au
     return $response;
 }
 
-// ==================== GATEWAY アクション処理（純粋リレー） ====================
+// ==================== GATEWAY アクション処理 ====================
 function handleGatewayAction(array $input): array {
     debug_log("handleGatewayAction called");
     
@@ -146,39 +146,7 @@ function handleGatewayAction(array $input): array {
     }
 }
 
-// ==================== メインリクエスト処理 ====================
-$raw_input = file_get_contents("php://input");
-debug_log("=== REQUEST START ===");
-debug_log("raw_input: " . substr($raw_input, 0, 500) . "...");
-
-$input = json_decode($raw_input, true);
-if (!is_array($input)) {
-    debug_log("invalid JSON input");
-    http_response_code(400);
-    die(json_encode(["success" => false, "message" => "invalid input"]));
-}
-
-$action = $input["action"] ?? "auth";
-$gameToken = $input["gametoken"] ?? $input["token"] ?? null;
-$sid = $input["sid"] ?? null;
-$session_id = $input["session_id"] ?? null;
-$region = strtolower(trim($input["region"] ?? 'ap'));
-
-debug_log("action: " . $action);
-
-// ==================== GATEWAY アクション（純粋リレー） ====================
-if ($action === "gateway") {
-    debug_log("Processing gateway relay action");
-    $result = handleGatewayAction($input);
-    if ($result['success']) {
-        die(json_encode(["success" => true, "data" => $result['data']]));
-    } else {
-        http_response_code(400);
-        die(json_encode(["success" => false, "message" => $result['error'] ?? "gateway failed"]));
-    }
-}
-
-// ==================== HB_BLOB アクション（Riotリレー） ====================
+// ==================== HB_BLOB アクション（AUTH → ACCESS → HEARTBEAT） ====================
 if ($action === "hb_blob") {
     $session_id = $input['session_id'] ?? null;
     $puuid = $input['puuid'] ?? null;
@@ -216,7 +184,7 @@ if ($action === "hb_blob") {
             saveSessions($sessions);
         }
         
-        // ★★★ ステップ1: ACCESS リクエスト ★★★
+        // ★★★ ステップ1: ACCESS リクエスト（AUTH応答をACCESSペイロードとして使用） ★★★
         debug_log("HB_BLOB: Sending ACCESS request to Riot...");
         $access_response = sendToRiotGateway($auth_decoded, $region, 'access');
         
