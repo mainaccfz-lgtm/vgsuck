@@ -10,7 +10,6 @@ function debug_log($msg) {
 
 // ==================== 定数定義 ====================
 define('SESSIONS_FILE', __DIR__ . '/sessions.json');
-define('GATEWAY_API_KEY', 'fiverdbull');
 
 // ==================== セッション管理 ====================
 function loadSessions(): array {
@@ -80,8 +79,13 @@ function sendToRiotGateway(string $payload, string $region, string $action = 'au
     }
     
     if ($httpCode !== 200 && $httpCode !== 201) {
-        throw new RuntimeException("Riot Gateway returned HTTP $httpCode");
+        throw new RuntimeException("Riot Gateway returned HTTP $httpCode" . ($response ? ": " . substr($response, 0, 200) : ""));
     }
+    
+    if (empty($response)) {
+        throw new RuntimeException("Riot Gateway returned empty response");
+    }
+    
     return $response;
 }
 
@@ -100,7 +104,7 @@ function handleGatewayAction(array $input): array {
         return ['success' => false, 'error' => 'missing d field'];
     }
     
-    $decoded = base64_decode($d);
+    $decoded = base64_decode($d, true);
     if ($decoded === false || empty($decoded)) {
         debug_log("handleGatewayAction: base64 decode failed");
         return ['success' => false, 'error' => 'invalid base64 data'];
@@ -120,7 +124,6 @@ function handleGatewayAction(array $input): array {
         
         debug_log("handleGatewayAction: sending to Riot Gateway with action=" . $action);
         
-        // ★★★ Riot公式サーバーにリレー（加工なし） ★★★
         $riotResponse = sendToRiotGateway($decoded, $region, $action);
         
         if (empty($riotResponse)) {
@@ -129,8 +132,8 @@ function handleGatewayAction(array $input): array {
         
         debug_log("handleGatewayAction: Riot response len=" . strlen($riotResponse));
         
-        // ★★★ Riotの応答をそのままBase64エンコードして返す（加工なし） ★★★
         $result = base64_encode($riotResponse);
+        debug_log("handleGatewayAction: encoded result len=" . strlen($result));
         
         return [
             'success' => true,
@@ -179,73 +182,66 @@ if ($action === "gateway") {
 if ($action === "hb_blob") {
     $session_id = $input['session_id'] ?? null;
     $puuid = $input['puuid'] ?? null;
+    $auth_data = $input['auth_data'] ?? null;
+    $region = $input['region'] ?? 'ap';
     
-    debug_log("HB_BLOB: session_id=" . $session_id . " puuid=" . $puuid);
+    debug_log("HB_BLOB: session_id=" . $session_id . " puuid=" . $puuid . " auth_data_len=" . strlen($auth_data));
     
-    if (!$session_id || !$puuid) {
-        debug_log("HB_BLOB: missing session_id or puuid");
-        die(json_encode(["success" => false, "message" => "missing session_id or puuid"]));
+    if (!$session_id || !$puuid || !$auth_data) {
+        debug_log("HB_BLOB: missing required fields");
+        die(json_encode(["success" => false, "message" => "missing required fields"]));
     }
     
-    // セッション確認
-    $sessions = loadSessions();
-    if (!isset($sessions[$session_id])) {
-        debug_log("HB_BLOB: session not found, creating new session: " . $session_id);
-        $sessions[$session_id] = [
-            'session_id' => $session_id,
-            'sid' => $session_id,
-            'token' => '',
-            'region' => $region,
-            'created_at' => time(),
-            'updated_at' => time()
-        ];
-        saveSessions($sessions);
+    $auth_decoded = base64_decode($auth_data, true);
+    if ($auth_decoded === false || empty($auth_decoded)) {
+        debug_log("HB_BLOB: Invalid auth data");
+        die(json_encode(["success" => false, "message" => "invalid auth data"]));
     }
+    
+    debug_log("HB_BLOB: auth_decoded len=" . strlen($auth_decoded));
     
     try {
-        // ★★★ セッションから認証データを取得 ★★★
-        $auth_data = $sessions[$session_id]['auth_response'] ?? null;
-        if (!$auth_data) {
-            debug_log("HB_BLOB: No auth response cached, trying to get from global");
-            // グローバルキャッシュから取得（C++が送信する場合）
-            $auth_data = $input['auth_data'] ?? null;
+        // ★★★ セッション確認 ★★★
+        $sessions = loadSessions();
+        if (!isset($sessions[$session_id])) {
+            debug_log("HB_BLOB: creating new session: " . $session_id);
+            $sessions[$session_id] = [
+                'session_id' => $session_id,
+                'sid' => $session_id,
+                'token' => '',
+                'region' => $region,
+                'created_at' => time(),
+                'updated_at' => time()
+            ];
+            saveSessions($sessions);
         }
         
-        if (!$auth_data) {
-            debug_log("HB_BLOB: No auth data available, cannot build heartbeat");
-            die(json_encode(["success" => false, "message" => "no auth data"]));
+        // ★★★ ステップ1: ACCESS リクエスト ★★★
+        debug_log("HB_BLOB: Sending ACCESS request to Riot...");
+        $access_response = sendToRiotGateway($auth_decoded, $region, 'access');
+        
+        if (empty($access_response)) {
+            throw new RuntimeException("ACCESS request failed - empty response");
+        }
+        debug_log("HB_BLOB: ACCESS response len=" . strlen($access_response));
+        
+        // ★★★ ステップ2: ACCESSレスポンスでHEARTBEAT ★★★
+        debug_log("HB_BLOB: Sending HEARTBEAT request to Riot...");
+        $heartbeat_response = sendToRiotGateway($access_response, $region, 'heartbeat');
+        
+        if (empty($heartbeat_response)) {
+            throw new RuntimeException("HEARTBEAT request failed - empty response");
         }
         
-        // ★★★ Riotにハートビートリクエストを送信（加工なし） ★★★
-        $auth_decoded = base64_decode($auth_data);
-        if ($auth_decoded === false || empty($auth_decoded)) {
-            debug_log("HB_BLOB: Invalid auth data");
-            die(json_encode(["success" => false, "message" => "invalid auth data"]));
-        }
+        debug_log("HB_BLOB: HEARTBEAT response len=" . strlen($heartbeat_response));
         
-        // ★★★ Riotに直接ハートビートを送信 ★★★
-        $riotResponse = sendToRiotGateway($auth_decoded, $region, 'heartbeat');
+        $hb_blob = base64_encode($heartbeat_response);
+        debug_log("HB_BLOB: encoded hb_blob len=" . strlen($hb_blob));
         
-        if (empty($riotResponse)) {
-            debug_log("HB_BLOB: Empty Riot response");
-            die(json_encode(["success" => false, "message" => "empty response from Riot"]));
-        }
-        
-        debug_log("HB_BLOB: Riot heartbeat response len=" . strlen($riotResponse));
-        
-        // ★★★ Riotの応答をそのままBase64エンコードして返す ★★★
-        $hb_blob = base64_encode($riotResponse);
-        
-        $response = [
+        die(json_encode([
             "success" => true,
-            "data" => $hb_blob,
-            "task_ids" => [],
-            "cdn_paths" => [],
-            "ledger_len" => 0
-        ];
-        
-        debug_log("HB_BLOB: response data len=" . strlen($hb_blob));
-        die(json_encode($response));
+            "data" => $hb_blob
+        ]));
         
     } catch (Exception $e) {
         debug_log("HB_BLOB: exception: " . $e->getMessage());
@@ -321,7 +317,6 @@ if ($action === "poll") {
     
     $sess = $sessions[$session_id];
     
-    // チケットを生成（実際のVanguardチケットを模倣）
     $ticket = base64_encode(random_bytes(64));
     $sess['ticket'] = $ticket;
     $sess['ticket_created'] = time();
